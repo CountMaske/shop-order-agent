@@ -1,0 +1,8 @@
+spring:
+  application:
+    name: backend
+
+  # 不要在代码里面写上LLM API，会有泄漏风险
+  profiles:
+    active: local
+
