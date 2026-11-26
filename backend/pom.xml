@@ -94,6 +94,24 @@
                     </execution>
                 </executions>
             </plugin>
+<!--             Github CI 检测 高危-->
+            <plugin>
+                <groupId>com.github.spotbugs</groupId>
+                <artifactId>spotbugs-maven-plugin</artifactId>
+                <version>4.8.6.5</version>
+                <configuration>
+                    <threshold>High</threshold>   <!-- 只报高危 -->
+                    <failOnError>true</failOnError>  <!-- 有高危就构建失败 -->
+                </configuration>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>check</goal>   <!-- 绑定在 verify 阶段 -->
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+
         </plugins>
     </build>
 
