@@ -1,8 +1,8 @@
 package com.countmaske.orderagent.service;
 
-import com.countmaske.orderagent.dto.ChatRequest;
-import com.countmaske.orderagent.dto.ChatResponse;
 import com.countmaske.orderagent.domain.AgentDecision;
+import com.countmaske.orderagent.dto.ChatResponse;
+import com.countmaske.orderagent.tool.ToolRegistry;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
@@ -32,6 +32,11 @@ public class AgentEngineService {
     private static final int MAX_ITERATIONS = 5;
     private final ObjectMapper mapper = new ObjectMapper();
     private final RestTemplate restTemplate = new RestTemplate();
+    private final ToolRegistry toolRegistry;
+
+    public AgentEngineService(ToolRegistry toolRegistry) {
+        this.toolRegistry = toolRegistry;
+    }
 
     @Value("${llm.api-key:sk-placeholder}")
     private String apiKey;
@@ -147,15 +152,19 @@ public class AgentEngineService {
      * 构建 System Prompt（仅设定角色和上下文，工具 Schema 通过 tools 参数传入）
      */
     private String buildSystemPrompt() {
+        // 工具清单来自注册表，新增工具后这里自动同步，不再硬编码
         return """
-            你是商城订单助手，专门帮助用户完成下单、查订单、取消订单等操作。
+            你是商城订单助手，专门帮助用户完成搜索商品、算总价、下单、查订单、取消订单等操作。
 
             规则：
-            1. 需要查询商品、计算价格、创建订单时，必须通过 tool_calls 调用工具，
+            1. 需要查询商品、计算价格、创建/查询/取消订单时，必须通过 tool_calls 调用工具，
                不要只在文字里说「我先帮你搜索」。文字回答和工具调用是两回事。
             2. 只有当用户只是打招呼、闲聊、或问题不需要工具时，才直接用文字回答。
-            3. 可用工具：search（搜商品）、calculator（算总价）、create_order（下单）。
-            4. 调用工具后，根据工具返回结果决定下一步：继续调用其他工具，或用文字给出最终答案。
+            3. 可用工具：
+            """ + toolRegistry.describeTools() + """
+            4. 下单必须先以 confirm=false 调用 create_order 获取商品和总价，向用户确认后，
+               再用相同参数（含相同 idempotencyKey）以 confirm=true 完成下单。
+            5. 调用工具后，根据工具返回结果决定下一步：继续调用其他工具，或用文字给出最终答案。
             """;
     }
 
@@ -168,7 +177,7 @@ public class AgentEngineService {
             "model", model,
             "messages", messages,
             "enable_thinking", true,
-            "tools", getToolDefinitions()
+            "tools", toolRegistry.getDefinitions()
         );
 
         // 设置请求头
@@ -253,125 +262,11 @@ public class AgentEngineService {
     }
 
     /**
-     * 工具执行路由
+     * 工具执行路由：委托给注册表，不再写 switch。
+     * 新增工具只需实现 Tool 接口注册为 Bean，这里零改动。
      */
     private String executeTool(String toolName, JsonNode arguments) {
-        switch (toolName) {
-            case "calculator":
-                return calculator(arguments);
-            case "search":
-                return search(arguments);
-            case "create_order":
-                return createOrder(arguments);
-            default:
-                throw new IllegalArgumentException("Unknown tool: " + toolName);
-        }
-    }
-
-    /**
-     * 工具 1：calculator - 计算总价（mock）
-     */
-    private String calculator(JsonNode args) {
-        try {
-            double total = 0;
-            if (args.has("total")) {
-                total = args.get("total").asDouble();
-            } else if (args.has("items")) {
-                JsonNode items = args.get("items");
-                for (JsonNode item : items) {
-                    total += item.path("price").asDouble(0) * item.path("quantity").asInt(1);
-                }
-            }
-            return String.format("{\"total\": %.2f, \"currency\": \"CNY\"}", total);
-        } catch (Exception e) {
-            throw new RuntimeException("Calculator error: " + e.getMessage());
-        }
-    }
-
-    /**
-     * 工具 2：search - 搜索商品信息（mock）
-     */
-    private String search(JsonNode args) {
-        String keyword = args.has("keyword") ? args.get("keyword").asText() : "";
-        
-        // Mock 数据：矿泉水 / 可乐 / 气泡水
-        String mockData = "[{\"id\": 1, \"name\": \"农夫山泉 550ml\", \"price\": 2.0}, " +
-                         "{\"id\": 2, \"name\": \"可口可乐 330ml\", \"price\": 3.0}, " +
-                         "{\"id\": 3, \"name\": \"元气森林气泡水 480ml\", \"price\": 5.0}]";
-        
-        return mockData;
-    }
-
-    /**
-     * 工具 3：create_order - 创建订单
-     */
-    private String createOrder(JsonNode args) {
-        try {
-            String orderId = "ORD-" + System.currentTimeMillis();
-            String userId = args.has("userId") ? args.get("userId").asText() : "anonymous";
-            String status = "created";
-            
-            return String.format("{\"orderId\": \"%s\", \"userId\": \"%s\", \"status\": \"%s\"}", 
-                               orderId, userId, status);
-        } catch (Exception e) {
-            throw new RuntimeException("Create order error: " + e.getMessage());
-        }
-    }
-
-    /**
-     * 定义可用工具的 JSON Schema（OpenAI tools 格式）
-     */
-    private List<Map<String, Object>> getToolDefinitions() {
-        List<Map<String, Object>> tools = new ArrayList<>();
-
-        // Tool 1: calculator
-        Map<String, Object> calculator = new HashMap<>();
-        calculator.put("type", "function");
-        Map<String, Object> calculatorFunc = new HashMap<>();
-        calculatorFunc.put("name", "calculator");
-        calculatorFunc.put("description", "计算商品总价，支持传入 items 列表或直接的 total 值");
-        Map<String, Object> calculatorSchema = new HashMap<>();
-        calculatorSchema.put("type", "object");
-        Map<String, Object> calculatorProps = new HashMap<>();
-        calculatorProps.put("total", Map.of("type", "number", "description", "直接传入总金额"));
-        calculatorProps.put("items", Map.of("type", "array", "description", "商品列表，每项包含 price 和 quantity"));
-        calculatorSchema.put("properties", calculatorProps);
-        calculatorFunc.put("parameters", calculatorSchema);
-        calculator.put("function", calculatorFunc);
-        tools.add(calculator);
-
-        // Tool 2: search
-        Map<String, Object> search = new HashMap<>();
-        search.put("type", "function");
-        Map<String, Object> searchFunc = new HashMap<>();
-        searchFunc.put("name", "search");
-        searchFunc.put("description", "搜索商品信息，返回匹配的商品列表（mock 数据）");
-        Map<String, Object> searchSchema = new HashMap<>();
-        searchSchema.put("type", "object");
-        Map<String, Object> searchProps = new HashMap<>();
-        searchProps.put("keyword", Map.of("type", "string", "description", "搜索关键词"));
-        searchSchema.put("properties", searchProps);
-        searchFunc.put("parameters", searchSchema);
-        search.put("function", searchFunc);
-        tools.add(search);
-
-        // Tool 3: create_order
-        Map<String, Object> createOrder = new HashMap<>();
-        createOrder.put("type", "function");
-        Map<String, Object> createOrderFunc = new HashMap<>();
-        createOrderFunc.put("name", "create_order");
-        createOrderFunc.put("description", "创建新订单，返回订单号和状态");
-        Map<String, Object> createOrderSchema = new HashMap<>();
-        createOrderSchema.put("type", "object");
-        Map<String, Object> createOrderProps = new HashMap<>();
-        createOrderProps.put("userId", Map.of("type", "string", "description", "用户 ID"));
-        createOrderProps.put("items", Map.of("type", "array", "description", "商品列表"));
-        createOrderSchema.put("properties", createOrderProps);
-        createOrderFunc.put("parameters", createOrderSchema);
-        createOrder.put("function", createOrderFunc);
-        tools.add(createOrder);
-
-        return tools;
+        return toolRegistry.execute(toolName, arguments);
     }
 
     /**
